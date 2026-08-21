@@ -28,7 +28,7 @@
 
 ## 0～10分钟：确定定位
 
-阅读 `s01_agent_loop/README.zh.md`，只重点看：
+阅读 `../s01_agent_loop/README.zh.md`，只重点看：
 
 - The Problem
 - The Solution
@@ -43,7 +43,7 @@
 
 ## 10～30分钟：追踪代码
 
-打开`s01_agent_loop/code.py`，按照以下顺序找代码，不要从第一行逐行读：
+打开`../s01_agent_loop/code.py`，按照以下顺序找代码，不要从第一行逐行读：
 
 - [x] `client`和`MODEL`
 - [x] `SYSTEM`
