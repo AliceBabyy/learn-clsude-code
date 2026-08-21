@@ -145,13 +145,13 @@ MAX_ROUNDS = 10
 只写下面内容：
 
 ```text
-history中会出现哪些类型的数据：
-response.output可能包含什么：
-call_id的作用：
-一轮循环的边界：
-正常停止条件：
-强制停止条件：
-今天亲眼观察到的轮数：
+history中会出现哪些类型的数据：role, content, reasoning, function_call_output,
+response.output可能包含什么：reasoning, message, function_call
+call_id的作用：不知道
+一轮循环的边界：模型不再需要调用tool
+正常停止条件：用户输入关键词
+强制停止条件：轮次达到上限
+今天亲眼观察到的轮数：6
 仍然不懂的问题：
 ```
 

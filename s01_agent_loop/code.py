@@ -88,7 +88,15 @@ def run_bash(command: str) -> str:
 
 # -- 核心模式：持续调用模型和工具，直到模型决定停止 --
 def agent_loop(messages: list):
+    loop_time = 0
     while True:
+        loop_time += 1
+        print(f"循环轮次：{loop_time}")
+        print(f'history长度为：{len(messages)}')
+        print('messages列表内容：')
+        for message in messages:
+            print(message)
+        print('')
         response = client.responses.create(
             model=MODEL,
             instructions=SYSTEM,
@@ -97,6 +105,10 @@ def agent_loop(messages: list):
             max_output_tokens=8000,
         )
 
+        print('响应列表中的type如下：')
+        for type in response.output:
+            print(f"输出类型: {type.type}")
+        print('')
         # OpenAI Responses 可能包含消息、推理项和函数调用。
         # 保存所有输出项，确保下一次请求拥有完整的历史记录。
         #.extend是列表的追加方法，在列表后面追加元素，同时对参数具有解包功能
@@ -137,7 +149,7 @@ if __name__ == "__main__":
             break
         if query.strip().lower() in ("q", "exit", ""):
             break
-        #extend是把后面的东西作为一个整体进行追加，在这里就是把整个字典加进去，包含角色和用户问题
+        #是把后面的东西作为一个整体进行追加，就是把整个字典加进去，包含角色和用户问题
         history.append({"role": "user", "content": query})
         final_text = agent_loop(history)
         if final_text:
