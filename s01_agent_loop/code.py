@@ -99,12 +99,14 @@ def agent_loop(messages: list):
 
         # OpenAI Responses 可能包含消息、推理项和函数调用。
         # 保存所有输出项，确保下一次请求拥有完整的历史记录。
+        #.extend是列表的追加方法，在列表后面追加元素，同时对参数具有解包功能
+        #调用模型的返回内容response对象，response.output是一个列表
+        #现在信息包含：{角色，用户问题}，模型响应内容
         messages.extend(response.output)
 
         # 如果模型没有调用工具，本轮任务结束
-        tool_calls = [
-            item for item in response.output if item.type == "function_call"
-        ]
+        #列表推导式。response.output.type的类型有message，function_call，reasoning
+        tool_calls = [item for item in response.output if item.type == "function_call"]
         if not tool_calls:
             return response.output_text
 
@@ -135,6 +137,7 @@ if __name__ == "__main__":
             break
         if query.strip().lower() in ("q", "exit", ""):
             break
+        #extend是把后面的东西作为一个整体进行追加，在这里就是把整个字典加进去，包含角色和用户问题
         history.append({"role": "user", "content": query})
         final_text = agent_loop(history)
         if final_text:
