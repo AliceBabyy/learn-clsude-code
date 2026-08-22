@@ -39,7 +39,9 @@ from dotenv import load_dotenv
 
 load_dotenv(override=True)
 
+# 获取当前运行程序所在期目录
 WORKDIR = Path.cwd()
+
 client = OpenAI(
     api_key=os.getenv("OPENAI_API_KEY"),
     base_url=os.getenv("OPENAI_BASE_URL") or None,
@@ -142,6 +144,7 @@ TOOLS = [
      "parameters": {"type": "object", "properties": {"pattern": {"type": "string"}}, "required": ["pattern"]}},
 ]
 
+# 工具注册
 # -- s02 新增：分发表（替代 s01 中写死的 run_bash 调用）--
 # 本质是一个字典，key-value对应着工具名称-函数名称
 TOOL_HANDLERS = {
@@ -157,7 +160,10 @@ TOOL_HANDLERS = {
 # s01: output = run_bash(block.input["command"])
 # s02: output = TOOL_HANDLERS[block.name](**block.input)
 def agent_loop(messages: list):
+    loop_times = 0
     while True:
+        loop_times += 1
+        print(f"\033[35m> 循环次数：{loop_times}\033[0m")
         response = client.responses.create(
             model=MODEL,
             instructions=SYSTEM,
@@ -175,10 +181,12 @@ def agent_loop(messages: list):
         ]
         if not tool_calls:
             return response.output_text
+        print(f'\033需要调用工具数量为：{len(tool_calls)}\033[0m')
 
         # 按照收集的tool_calls，调用相应的工具，并把调用工具返回结果追加到messages
         for tool_call in tool_calls:
-            print(f"\033[33m> {tool_call.name}\033[0m")
+            print(f"\033[33m> 调用工具name：{tool_call.name}\033[0m")
+            print(f'\033[33m> 对应的函数名称为：{TOOL_HANDLERS.get(tool_call.name)}\033[0m')
             handler = TOOL_HANDLERS.get(tool_call.name)
             arguments = json.loads(tool_call.arguments)
             output = handler(**arguments) if handler else f"错误：未知工具 {tool_call.name}"
