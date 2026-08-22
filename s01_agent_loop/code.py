@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
 s01_agent_loop.py - 智能体循环
-
 AI 编程智能体最核心的模式如下：
 
     while True:

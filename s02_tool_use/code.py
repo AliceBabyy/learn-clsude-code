@@ -52,7 +52,6 @@ SYSTEM = f"你是位于 {WORKDIR} 的编程智能体。使用工具解决任务�
 
 
 # -- 来自 s01（保持不变）--
-
 def run_bash(command: str) -> str:
     dangerous = ["rm -rf /", "sudo", "shutdown", "reboot", "> /dev/"]
     if any(d in command for d in dangerous):
@@ -70,24 +69,30 @@ def run_bash(command: str) -> str:
 
 
 # -- s02 新增：四个工具 --
-
+# 安全路径检查
 def safe_path(p: str) -> Path:
     path = (WORKDIR / p).resolve()
     if not path.is_relative_to(WORKDIR):
         raise ValueError(f"路径超出工作区：{p}")
     return path
 
-
+# 读取文件内容
 def run_read(path: str, limit: int | None = None) -> str:
     try:
+        # 读取文件内容；lines是一个列表，内容元素是文件的每一行
+        # .read_text()是path的对象方法，作用是读取整个文件内容并且返回字符串
+        # .splitlines()是字符串方法，把字符串按照回车拆成列表
         lines = safe_path(path).read_text().splitlines()
+
+        # 如果指定了行数限制且文件行数超过限制，则截断并添加省略提示
         if limit and limit < len(lines):
             lines = lines[:limit] + [f"...（还有 {len(lines) - limit} 行）"]
+        # "\n".join()是用换行符吧所有列表元素连成一个字符串，最终返回一个字符串
         return "\n".join(lines)
     except Exception as e:
         return f"错误：{e}"
 
-
+# 读取文件内容
 def run_write(path: str, content: str) -> str:
     try:
         file_path = safe_path(path)
@@ -97,7 +102,7 @@ def run_write(path: str, content: str) -> str:
     except Exception as e:
         return f"错误：{e}"
 
-
+# 写入文件内容
 def run_edit(path: str, old_text: str, new_text: str) -> str:
     try:
         file_path = safe_path(path)
@@ -109,7 +114,7 @@ def run_edit(path: str, old_text: str, new_text: str) -> str:
     except Exception as e:
         return f"错误：{e}"
 
-
+# 文件编辑
 def run_glob(pattern: str) -> str:
     import glob as g
     try:
@@ -123,12 +128,12 @@ def run_glob(pattern: str) -> str:
 
 
 # -- s02 新增：工具定义（s01 有一个工具，s02 有五个）--
-
+# 本质是一个字典列表，每个字典定义一个工具
 TOOLS = [
     {"type": "function", "name": "bash", "description": "执行一条 Shell 命令。",
      "parameters": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}},
     {"type": "function", "name": "read_file", "description": "读取文件内容。",
-     "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "limit": {"type": "integer"}}, "required": ["path"]}},
+     "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "limit": {"type": "integer"}},"required": ["path"]}},
     {"type": "function", "name": "write_file", "description": "将内容写入文件。",
      "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}},
     {"type": "function", "name": "edit_file", "description": "精确替换文件中首次出现的指定文本。",
@@ -138,32 +143,40 @@ TOOLS = [
 ]
 
 # -- s02 新增：分发表（替代 s01 中写死的 run_bash 调用）--
-
+# 本质是一个字典，key-value对应着工具名称-函数名称
 TOOL_HANDLERS = {
-    "bash": run_bash, "read_file": run_read, "write_file": run_write,
-    "edit_file": run_edit, "glob": run_glob,
+    "bash": run_bash,
+    "read_file": run_read,
+    "write_file": run_write,
+    "edit_file": run_edit,
+    "glob": run_glob,
 }
 
 
 # -- 智能体循环保持与 s01 相同的结构，仅改变分发方式 --
 # s01: output = run_bash(block.input["command"])
 # s02: output = TOOL_HANDLERS[block.name](**block.input)
-
 def agent_loop(messages: list):
     while True:
         response = client.responses.create(
-            model=MODEL, instructions=SYSTEM, input=messages,
-            tools=TOOLS, max_output_tokens=8000,
+            model=MODEL,
+            instructions=SYSTEM,
+            input=messages,
+            tools=TOOLS,
+            max_output_tokens=8000,
         )
         # 保留全部输出项，包括消息、推理项和函数调用，供下一轮完整回传。
         messages.extend(response.output)
 
+        # 判断是否调用工具
+        # 列表推导式，过滤出所有需要调用工具的项
         tool_calls = [
             item for item in response.output if item.type == "function_call"
         ]
         if not tool_calls:
             return response.output_text
 
+        # 按照收集的tool_calls，调用相应的工具，并把调用工具返回结果追加到messages
         for tool_call in tool_calls:
             print(f"\033[33m> {tool_call.name}\033[0m")
             handler = TOOL_HANDLERS.get(tool_call.name)

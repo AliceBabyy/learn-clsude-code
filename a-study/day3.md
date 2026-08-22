@@ -1,3 +1,15 @@
+```text
+s2课程任务
+试试这些 prompt：
+
+1. `Read the file README.md and tell me what this project is about`
+2. `Create a file called test.py that prints "hello", then read it back`
+3. `Find all Python files in this directory`
+4. `Read both README.md and requirements.txt, then create a summary file`
+
+观察重点：模型什么时候只调一个工具，什么时候一次调多个？多个工具调用的顺序和结果是否正确？
+```
+
 第三天进入 `s02 Tool Use`。今天只解决一个核心问题：
 
 > Agent有多个工具时，模型如何选择工具，Harness又如何找到并执行正确的Python函数？
