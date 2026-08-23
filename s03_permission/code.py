@@ -46,7 +46,7 @@ SYSTEM = f"你是位于 {WORKDIR} 的编程智能体。所有破坏性操作都�
 
 
 # -- 来自 s02：工具实现 --
-
+# tool0：执行 Shell 命令
 def run_bash(command: str) -> str:
     try:
         r = subprocess.run(command, shell=True, cwd=WORKDIR,
@@ -59,7 +59,7 @@ def run_bash(command: str) -> str:
     except (FileNotFoundError, OSError) as e:
         return f"错误：{e}"
 
-
+# tool1：读取文件
 def run_read(path: str, limit: int | None = None) -> str:
     try:
         lines = (WORKDIR / path).resolve().read_text().splitlines()
@@ -69,7 +69,7 @@ def run_read(path: str, limit: int | None = None) -> str:
     except Exception as e:
         return f"错误：{e}"
 
-
+# tool2：写入文件
 def run_write(path: str, content: str) -> str:
     try:
         file_path = (WORKDIR / path).resolve()
@@ -79,7 +79,7 @@ def run_write(path: str, content: str) -> str:
     except Exception as e:
         return f"错误：{e}"
 
-
+# tool3：编辑文件
 def run_edit(path: str, old_text: str, new_text: str) -> str:
     try:
         file_path = (WORKDIR / path).resolve()
@@ -91,7 +91,7 @@ def run_edit(path: str, old_text: str, new_text: str) -> str:
     except Exception as e:
         return f"错误：{e}"
 
-
+# tool4：查找文件
 def run_glob(pattern: str) -> str:
     import glob as g
     try:
@@ -103,9 +103,8 @@ def run_glob(pattern: str) -> str:
     except Exception as e:
         return f"错误：{e}"
 
-
+# 工具的参数定义
 # -- 来自 s02（保持不变）：工具定义和分发 --
-
 TOOLS = [
     {"type": "function", "name": "bash", "description": "执行一条 Shell 命令。",
      "parameters": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}},
@@ -119,18 +118,23 @@ TOOLS = [
      "parameters": {"type": "object", "properties": {"pattern": {"type": "string"}}, "required": ["pattern"]}},
 ]
 
+# 工具注册
 TOOL_HANDLERS = {
-    "bash": run_bash, "read_file": run_read, "write_file": run_write,
-    "edit_file": run_edit, "glob": run_glob,
+    "bash": run_bash,
+    "read_file": run_read,
+    "write_file": run_write,
+    "edit_file": run_edit,
+    "glob": run_glob,
 }
 
 
 # -- s03 新增：三道权限管线 --
 
 # 第一道：硬拒绝列表，始终禁止
+
 DENY_LIST = ["rm -rf /", "sudo", "shutdown", "reboot", "mkfs", "dd if=", "> /dev/sda"]
 
-
+# 第一道防线的过滤函数
 def check_deny_list(command: str) -> str | None:
     for pattern in DENY_LIST:
         if pattern in command:
@@ -148,7 +152,7 @@ PERMISSION_RULES = [
      "message": "可能具有破坏性的命令"},
 ]
 
-
+# 第二道防线过滤函数
 def check_rules(tool_name: str, args: dict) -> str | None:
     for rule in PERMISSION_RULES:
         if tool_name in rule["tools"] and rule["check"](args):
@@ -156,7 +160,7 @@ def check_rules(tool_name: str, args: dict) -> str | None:
     return None
 
 
-# 第三道：用户批准，规则匹配后等待确认
+# 第三道：提交并接收用户审批，规则匹配后等待确认
 def ask_user(tool_name: str, args: dict, reason: str) -> str:
     print(f"\n\033[33m[权限] {reason}\033[0m")
     print(f"   工具：{tool_name}({args})")
@@ -182,10 +186,17 @@ def check_permission(tool_name: str, arguments: dict) -> bool:
 # -- 智能体循环：与 s02 相同，并插入 check_permission() --
 
 def agent_loop(messages: list):
+    loop_times=0
     while True:
+        loop_times+=1
+        print(f"\n\033[35m> 循环次数：{loop_times}\033[0m")
+
         response = client.responses.create(
-            model=MODEL, instructions=SYSTEM, input=messages,
-            tools=TOOLS, max_output_tokens=8000,
+            model=MODEL,
+            instructions=SYSTEM,
+            input=messages,
+            tools=TOOLS,
+            max_output_tokens=8000,
         )
         # 保留全部输出项，包括消息、推理项和函数调用，供下一轮完整回传。
         messages.extend(response.output)
@@ -196,9 +207,18 @@ def agent_loop(messages: list):
         if not tool_calls:
             return response.output_text
 
+        print(f"\n\033[35m>需要调用工具数量为：{len(tool_calls)}\033[0m")
         for tool_call in tool_calls:
-            print(f"\033[36m> {tool_call.name}\033[0m")
+            print(f"\033[36m> 需要调用工具的名称为:{tool_call.name}\033[0m")
             arguments = json.loads(tool_call.arguments)
+#arguments是模型响应中 返回的 工具调用 的参数，与定义的TOOLS参数有所不同
+            # 大模型返回的响应里，包含类似这样的数据（这是JSON格式）：
+            # {
+            #     "type": "function_call",
+            #     "name": "bash",  # ← 点的是“bash”这道菜
+            #     "call_id": "call_abc123",  # ← 这单的流水号
+            #     "arguments": "{\"command\": \"ls -la\"}"  # ← 具体备注：执行 ls -la
+            # }
 
             # s03 变更：执行工具前先经过权限管线
             if not check_permission(tool_call.name, arguments):
