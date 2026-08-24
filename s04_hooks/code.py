@@ -1,25 +1,26 @@
 #!/usr/bin/env python3
 """
-s04_hooks.py - Hooks
+s04_hooks.py - 钩子
 
-Hooks run callbacks at fixed points in the agent loop:
+Hook 会在智能体循环的固定位置执行回调：
 
-    User prompt
+      用户提示
          |
          v
     UserPromptSubmit
          |
          v
     +----------+      +-------+      +------------+      +-------+
-    | messages | ---> |  LLM  | ---> | PreToolUse | ---> | Tool  |
+    |   消息   | ---> |  LLM  | ---> | PreToolUse | ---> | 工具  |
     +----------+      +---+---+      | permission |      +---+---+
-         ^                | stop     | log        |          |
+         ^                | 停止     | 权限、日志 |          |
          |                v          +------------+          v
-         |            Stop hook                         PostToolUse
+         |            Stop Hook                         PostToolUse
          |                                               |
-         +---------------- tool_result ------------------+
+         +----------------- 工具结果 --------------------+
 """
 
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -33,60 +34,63 @@ try:
 except ImportError:
     pass
 
-from anthropic import Anthropic
+from openai import OpenAI
 from dotenv import load_dotenv
 
 load_dotenv(override=True)
-if os.getenv("ANTHROPIC_BASE_URL"):
-    os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
 
 WORKDIR = Path.cwd()
-client = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL"))
-MODEL = os.environ["MODEL_ID"]
+client = OpenAI(
+    api_key=os.getenv("OPENAI_API_KEY"),
+    base_url=os.getenv("OPENAI_BASE_URL") or None,
+)
+MODEL = os.getenv("OPENAI_MODEL_ID")
+if not MODEL:
+    raise RuntimeError("缺少 OPENAI_MODEL_ID，请在项目根目录的 .env 中配置模型名称")
 
-SYSTEM = f"You are a coding agent at {WORKDIR}. Use tools to solve tasks. Act, don't explain."
+SYSTEM = f"你是位于 {WORKDIR} 的编程智能体。使用工具解决任务。直接行动，不要只解释。"
 
 
-# -- From s02-s03: tool implementations --
+# -- 来自 s02-s03 的工具实现 --
 
 def run_bash(command: str) -> str:
     try:
         r = subprocess.run(command, shell=True, cwd=WORKDIR,
                            capture_output=True, text=True, timeout=120)
         out = (r.stdout + r.stderr).strip()
-        return out[:50000] if out else "(no output)"
+        return out[:50000] if out else "（没有输出）"
     except subprocess.TimeoutExpired:
-        return "Error: Timeout (120s)"
+        return "错误：执行超时（120 秒）"
 
 def run_read(path: str, limit: int | None = None) -> str:
     try:
         file_path = (WORKDIR / path).resolve()
         lines = file_path.read_text().splitlines()
         if limit and limit < len(lines):
-            lines = lines[:limit] + [f"... ({len(lines) - limit} more lines)"]
+            lines = lines[:limit] + [f"...（还有 {len(lines) - limit} 行）"]
         return "\n".join(lines)
     except Exception as e:
-        return f"Error: {e}"
+        return f"错误：{e}"
 
 def run_write(path: str, content: str) -> str:
     try:
         file_path = (WORKDIR / path).resolve()
         file_path.parent.mkdir(parents=True, exist_ok=True)
         file_path.write_text(content)
-        return f"Wrote {len(content)} bytes to {path}"
+        return f"已向 {path} 写入 {len(content)} 字节"
     except Exception as e:
-        return f"Error: {e}"
+        return f"错误：{e}"
 
 def run_edit(path: str, old_text: str, new_text: str) -> str:
     try:
         file_path = (WORKDIR / path).resolve()
         text = file_path.read_text()
         if old_text not in text:
-            return f"Error: text not found in {path}"
+            return f"错误：在 {path} 中未找到指定文本"
         file_path.write_text(text.replace(old_text, new_text, 1))
-        return f"Edited {path}"
+        return f"已编辑 {path}"
     except Exception as e:
-        return f"Error: {e}"
+        return f"错误：{e}"
 
 def run_glob(pattern: str) -> str:
     import glob as g
@@ -95,21 +99,21 @@ def run_glob(pattern: str) -> str:
         for match in g.glob(pattern, root_dir=WORKDIR):
             if (WORKDIR / match).resolve().is_relative_to(WORKDIR):
                 results.append(match)
-        return "\n".join(results) if results else "(no matches)"
+        return "\n".join(results) if results else "（没有匹配项）"
     except Exception as e:
-        return f"Error: {e}"
+        return f"错误：{e}"
 
 TOOLS = [
-    {"name": "bash", "description": "Run a shell command.",
-     "input_schema": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}},
-    {"name": "read_file", "description": "Read file contents.",
-     "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "limit": {"type": "integer"}}, "required": ["path"]}},
-    {"name": "write_file", "description": "Write content to a file.",
-     "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}},
-    {"name": "edit_file", "description": "Replace exact text in a file once.",
-     "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "old_text": {"type": "string"}, "new_text": {"type": "string"}}, "required": ["path", "old_text", "new_text"]}},
-    {"name": "glob", "description": "Find files matching a glob pattern.",
-     "input_schema": {"type": "object", "properties": {"pattern": {"type": "string"}}, "required": ["pattern"]}},
+    {"type": "function", "name": "bash", "description": "执行一条 Shell 命令。",
+     "parameters": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}},
+    {"type": "function", "name": "read_file", "description": "读取文件内容。",
+     "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "limit": {"type": "integer"}}, "required": ["path"]}},
+    {"type": "function", "name": "write_file", "description": "将内容写入文件。",
+     "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}},
+    {"type": "function", "name": "edit_file", "description": "精确替换文件中首次出现的指定文本。",
+     "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "old_text": {"type": "string"}, "new_text": {"type": "string"}}, "required": ["path", "old_text", "new_text"]}},
+    {"type": "function", "name": "glob", "description": "查找与 glob 模式匹配的文件。",
+     "parameters": {"type": "object", "properties": {"pattern": {"type": "string"}}, "required": ["pattern"]}},
 ]
 
 TOOL_HANDLERS = {
@@ -118,7 +122,7 @@ TOOL_HANDLERS = {
 }
 
 
-# -- New in s04: hook system (s03 permission logic now uses hooks) --
+# -- s04 新增：Hook 系统（s03 权限逻辑现在通过 Hook 实现）--
 
 HOOKS = {"UserPromptSubmit": [], "PreToolUse": [], "PostToolUse": [], "Stop": []}
 
@@ -128,62 +132,64 @@ def register_hook(event: str, callback):
 def trigger_hooks(event: str, *args):
     for callback in HOOKS[event]:
         result = callback(*args)
-        if result is not None:  # A hook result blocks this tool call.
+        if result is not None:  # Hook 返回结果表示阻止本次工具调用。
             return result
     return None
 
 
-# s03 permission check logic, now wrapped as a hook
+# s03 权限检查逻辑，现在封装为 Hook
 DENY_LIST = ["rm -rf /", "sudo", "shutdown", "reboot", "mkfs", "dd if="]
 DESTRUCTIVE = ["rm ", "> /etc/", "chmod 777"]
 
-def permission_hook(block):
-    """PreToolUse: s03 check_permission() logic moved here."""
-    if block.name == "bash":
+def permission_hook(tool_name: str, arguments: dict):
+    """PreToolUse：将 s03 check_permission() 权限逻辑移到这里。"""
+    if tool_name == "bash":
         for pattern in DENY_LIST:
-            if pattern in block.input.get("command", ""):
-                print(f"\n\033[31m[blocked] '{pattern}'\033[0m")
-                return "Permission denied by deny list"
+            if pattern in arguments.get("command", ""):
+                print(f"\n\033[31m[已阻止] '{pattern}'\033[0m")
+                return "权限拒绝：命令命中禁止列表"
         for kw in DESTRUCTIVE:
-            if kw in block.input.get("command", ""):
-                print(f"\n\033[33m[permission] Potentially destructive command\033[0m")
-                print(f"   Tool: {block.name}({block.input})")
-                choice = input("   Allow? [y/N] ").strip().lower()
+            if kw in arguments.get("command", ""):
+                print(f"\n\033[33m[权限确认] 可能具有破坏性的命令\033[0m")
+                print(f"   工具：{tool_name}({arguments})")
+                choice = input("   是否允许？[y/N] ").strip().lower()
                 if choice not in ("y", "yes"):
-                    return "Permission denied by user"
-    if block.name in ("read_file", "write_file", "edit_file"):
-        path = block.input.get("path", "")
+                    return "权限拒绝：用户未授权"
+    if tool_name in ("read_file", "write_file", "edit_file"):
+        path = arguments.get("path", "")
         if not (WORKDIR / path).resolve().is_relative_to(WORKDIR):
-            print(f"\n\033[33m[permission] Access outside workspace\033[0m")
-            print(f"   Tool: {block.name}({block.input})")
-            choice = input("   Allow? [y/N] ").strip().lower()
+            print(f"\n\033[33m[权限确认] 正在访问工作区外部\033[0m")
+            print(f"   工具：{tool_name}({arguments})")
+            choice = input("   是否允许？[y/N] ").strip().lower()
             if choice not in ("y", "yes"):
-                return "Permission denied by user"
+                return "权限拒绝：用户未授权"
     return None
 
-def log_hook(block):
-    """PreToolUse: log every tool call."""
-    args_preview = str(list(block.input.values())[:2])[:60]
-    print(f"\033[90m[HOOK] {block.name}({args_preview})\033[0m")
+def log_hook(tool_name: str, arguments: dict):
+    """PreToolUse：记录每次工具调用。"""
+    args_preview = str(list(arguments.values())[:2])[:60]
+    print(f"\033[90m[HOOK] {tool_name}({args_preview})\033[0m")
     return None
 
-def large_output_hook(block, output):
-    """PostToolUse: warn on large output."""
+def large_output_hook(tool_name: str, arguments: dict, output):
+    """PostToolUse：工具输出过大时发出警告。"""
     if len(str(output)) > 100000:
-        print(f"\033[33m[HOOK] Large output from {block.name}: {len(str(output))} chars\033[0m")
+        print(f"\033[33m[HOOK] {tool_name} 输出过大：{len(str(output))} 个字符\033[0m")
     return None
 
-# UserPromptSubmit hook: log user input before it reaches the LLM
+# UserPromptSubmit Hook：用户输入到达 LLM 前记录当前工作目录
 def context_inject_hook(query: str):
-    print(f"\033[90m[HOOK] UserPromptSubmit: working in {WORKDIR}\033[0m")
+    print(f"\033[90m[HOOK] UserPromptSubmit：当前工作目录为 {WORKDIR}\033[0m")
     return None
 
-# Stop hook: print summary when loop is about to exit
+# Stop Hook：循环即将结束时打印摘要
 def summary_hook(messages: list):
-    tool_count = sum(1 for m in messages
-                     for b in (m.get("content") if isinstance(m.get("content"), list) else [])
-                     if isinstance(b, dict) and b.get("type") == "tool_result")
-    print(f"\033[90m[HOOK] Stop: session used {tool_count} tool calls\033[0m")
+    tool_count = sum(
+        1 for item in messages
+        if (item.get("type") if isinstance(item, dict) else getattr(item, "type", None))
+        == "function_call"
+    )
+    print(f"\033[90m[HOOK] Stop：本次会话调用了 {tool_count} 次工具\033[0m")
     return None
 
 register_hook("UserPromptSubmit", context_inject_hook)
@@ -193,50 +199,65 @@ register_hook("PostToolUse", large_output_hook)
 register_hook("Stop", summary_hook)
 
 
-# -- Agent loop: same structure as s03, but no hard-coded check --
-# s03: if not check_permission(block): ...
-# s04: if trigger_hooks("PreToolUse", block): ...
+# -- 智能体循环：结构与 s03 相同，但不再写死权限检查 --
+# s03：if not check_permission(tool_name, arguments): ...
+# s04：if trigger_hooks("PreToolUse", tool_name, arguments): ...
 
 def agent_loop(messages: list):
     while True:
-        response = client.messages.create(
-            model=MODEL, system=SYSTEM, messages=messages,
-            tools=TOOLS, max_tokens=8000,
+        response = client.responses.create(
+            model=MODEL,
+            instructions=SYSTEM,
+            input=messages,
+            tools=TOOLS,
+            max_output_tokens=8000,
         )
-        messages.append({"role": "assistant", "content": response.content})
+        # 保留全部输出项，包括消息、推理项和函数调用，供下一轮完整回传。
+        messages.extend(response.output)
 
         tool_calls = [
-            block for block in response.content if block.type == "tool_use"
+            item for item in response.output if item.type == "function_call"
         ]
         if not tool_calls:
             force = trigger_hooks("Stop", messages)
             if force:
                 messages.append({"role": "user", "content": force})
                 continue
-            return
+            return response.output_text
 
-        results = []
-        for block in tool_calls:
-            # s04 change: hook replaces hard-coded check_permission()
-            blocked = trigger_hooks("PreToolUse", block)
+        for tool_call in tool_calls:
+            arguments = json.loads(tool_call.arguments)
+
+            # s04 变化：用 Hook 替代写死的 check_permission()。
+            # PreToolUse 必须先于处理函数执行。
+            blocked = trigger_hooks("PreToolUse", tool_call.name, arguments)
             if blocked:
-                results.append({"type": "tool_result", "tool_use_id": block.id,
-                                "content": str(blocked)})
+                messages.append({
+                    "type": "function_call_output",
+                    "call_id": tool_call.call_id,
+                    "output": str(blocked),
+                })
                 continue
 
-            handler = TOOL_HANDLERS.get(block.name)
-            output = handler(**block.input) if handler else f"Unknown: {block.name}"
+            handler = TOOL_HANDLERS.get(tool_call.name)
+            try:
+                output = handler(**arguments) if handler else f"错误：未知工具 {tool_call.name}"
+            except Exception as e:
+                output = f"错误：{e}"
 
-            trigger_hooks("PostToolUse", block, output)  # s04: post hook
+            trigger_hooks("PostToolUse", tool_call.name, arguments, output)
 
-            results.append({"type": "tool_result", "tool_use_id": block.id, "content": output})
-
-        messages.append({"role": "user", "content": results})
+            messages.append({
+                "type": "function_call_output",
+                "call_id": tool_call.call_id,
+                "output": str(output),
+            })
 
 
 if __name__ == "__main__":
-    print("s04: Hooks - extension logic on hooks, loop stays clean")
-    print("Enter a question, press Enter to send. Type q to quit.\n")
+    print("s04：Hook - 通过钩子扩展逻辑，保持循环简洁")
+    print("输入问题后按回车发送，输入 q 或 exit 退出。\n")
+    print(f"请求地址：{client.base_url}responses")
 
     history = []
     while True:
@@ -248,8 +269,7 @@ if __name__ == "__main__":
             break
         trigger_hooks("UserPromptSubmit", query)
         history.append({"role": "user", "content": query})
-        agent_loop(history)
-        for block in history[-1]["content"]:
-            if getattr(block, "type", None) == "text":
-                print(block.text)
+        final_text = agent_loop(history)
+        if final_text:
+            print(final_text)
         print()
