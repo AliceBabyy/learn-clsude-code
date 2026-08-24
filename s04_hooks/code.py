@@ -11,9 +11,9 @@ Hook 会在智能体循环的固定位置执行回调：
          |
          v
     +----------+      +-------+      +------------+      +-------+
-    |   消息   | ---> |  LLM  | ---> | PreToolUse | ---> | 工具  |
+    |   消息   | ---> |  LLM  | --->  | PreToolUse | ---> | 工具  |
     +----------+      +---+---+      | permission |      +---+---+
-         ^                | 停止     | 权限、日志 |          |
+         ^                | 停止      | 权限、日志 |          |
          |                v          +------------+          v
          |            Stop Hook                         PostToolUse
          |                                               |
@@ -48,9 +48,11 @@ MODEL = os.getenv("OPENAI_MODEL_ID")
 if not MODEL:
     raise RuntimeError("缺少 OPENAI_MODEL_ID，请在项目根目录的 .env 中配置模型名称")
 
+# ----------------------------------------------------------------------------
+
 SYSTEM = f"你是位于 {WORKDIR} 的编程智能体。使用工具解决任务。直接行动，不要只解释。"
 
-
+# 5个tool的工具函数定义
 # -- 来自 s02-s03 的工具实现 --
 
 def run_bash(command: str) -> str:
@@ -121,14 +123,17 @@ TOOL_HANDLERS = {
     "edit_file": run_edit, "glob": run_glob,
 }
 
+# ---------------------------------------------------------------------------
 
 # -- s04 新增：Hook 系统（s03 权限逻辑现在通过 Hook 实现）--
-
+# 整个钩子本质是一个字典，键是事件名称，值是回调函数列表
 HOOKS = {"UserPromptSubmit": [], "PreToolUse": [], "PostToolUse": [], "Stop": []}
 
+# 注册钩子；参数为 事件名称，回调函数；作用是把回调函数/钩子压进钩子字典中
 def register_hook(event: str, callback):
     HOOKS[event].append(callback)
 
+# 触发钩子；参数为 事件名称，可选的回调参数；
 def trigger_hooks(event: str, *args):
     for callback in HOOKS[event]:
         result = callback(*args)
@@ -136,11 +141,15 @@ def trigger_hooks(event: str, *args):
             return result
     return None
 
-
 # s03 权限检查逻辑，现在封装为 Hook
 DENY_LIST = ["rm -rf /", "sudo", "shutdown", "reboot", "mkfs", "dd if="]
 DESTRUCTIVE = ["rm ", "> /etc/", "chmod 777"]
 
+# 回调函数
+# 所有回调函数接收的参数，第一个参数是工具名称，第二个参数是工具参数，在trigger_hooks中是以*args的形式接收的
+
+# 1. PreToolUse - Permission Hook：检查工具调用权限
+# 参数：工具名称， 工具参数
 def permission_hook(tool_name: str, arguments: dict):
     """PreToolUse：将 s03 check_permission() 权限逻辑移到这里。"""
     if tool_name == "bash":
@@ -165,24 +174,26 @@ def permission_hook(tool_name: str, arguments: dict):
                 return "权限拒绝：用户未授权"
     return None
 
+# 2. PreToolUse - Log Hook：记录每次工具调用
 def log_hook(tool_name: str, arguments: dict):
     """PreToolUse：记录每次工具调用。"""
     args_preview = str(list(arguments.values())[:2])[:60]
     print(f"\033[90m[HOOK] {tool_name}({args_preview})\033[0m")
     return None
 
+# 3. PostToolUse - Large Output Hook：工具输出过大时发出警告
 def large_output_hook(tool_name: str, arguments: dict, output):
     """PostToolUse：工具输出过大时发出警告。"""
     if len(str(output)) > 100000:
         print(f"\033[33m[HOOK] {tool_name} 输出过大：{len(str(output))} 个字符\033[0m")
     return None
 
-# UserPromptSubmit Hook：用户输入到达 LLM 前记录当前工作目录
+# 4. UserPromptSubmit - Context Inject Hook：用户输入到达 LLM 前记录当前工作目录
 def context_inject_hook(query: str):
     print(f"\033[90m[HOOK] UserPromptSubmit：当前工作目录为 {WORKDIR}\033[0m")
     return None
 
-# Stop Hook：循环即将结束时打印摘要
+# 5. Stop - Summary Hook：循环即将结束时打印摘要
 def summary_hook(messages: list):
     tool_count = sum(
         1 for item in messages
@@ -192,19 +203,34 @@ def summary_hook(messages: list):
     print(f"\033[90m[HOOK] Stop：本次会话调用了 {tool_count} 次工具\033[0m")
     return None
 
-register_hook("UserPromptSubmit", context_inject_hook)
+# 写了5个回调函数，并且都注册了，对应着上面定义的5个钩子
 register_hook("PreToolUse", permission_hook)
 register_hook("PreToolUse", log_hook)
 register_hook("PostToolUse", large_output_hook)
+register_hook("UserPromptSubmit", context_inject_hook)
 register_hook("Stop", summary_hook)
+#注册前的样子是：
+# HOOKS = {"UserPromptSubmit": [],
+#          "PreToolUse": [],
+#          "PostToolUse": [],
+#          "Stop": []}
+# 全部注册之后的HOKS的样子是：
+# HOOKS = {"UserPromptSubmit": [context_inject_hook],
+#          "PreToolUse": [permission_hook, log_hook],
+#          "PostToolUse": [large_output_hook],
+#          "Stop": [summary_hook]}
 
-
+# ---------------------------------------------------------------------------------
 # -- 智能体循环：结构与 s03 相同，但不再写死权限检查 --
 # s03：if not check_permission(tool_name, arguments): ...
 # s04：if trigger_hooks("PreToolUse", tool_name, arguments): ...
 
 def agent_loop(messages: list):
+    loop_times = 0
     while True:
+        loop_times += 1
+        print(f"\n\033[35m> 循环次数：{loop_times}\033[0m")
+
         response = client.responses.create(
             model=MODEL,
             instructions=SYSTEM,
@@ -225,11 +251,16 @@ def agent_loop(messages: list):
                 continue
             return response.output_text
 
+        print(f"\n\033[35m>需要调用工具数量为：{len(tool_calls)}\033[0m")
         for tool_call in tool_calls:
+            print(f"\033[36m> 需要调用工具的名称为:{tool_call.name}\033[0m")
             arguments = json.loads(tool_call.arguments)
 
             # s04 变化：用 Hook 替代写死的 check_permission()。
             # PreToolUse 必须先于处理函数执行。
+            # tool_call.name取得是需要调用工具对应的工具函数的名字，严格对齐函数名字
+            # arguments对应的是该工具的参数，这个是模型返回的要求的工具参数，对齐工具所需的参数
+            # 此处调用了执行钩子，具体来说是调用了统一调用回调函数的trigger_hooks，由这个函数来执行具体的钩子（即回调函数）
             blocked = trigger_hooks("PreToolUse", tool_call.name, arguments)
             if blocked:
                 messages.append({
@@ -239,12 +270,14 @@ def agent_loop(messages: list):
                 })
                 continue
 
+            # 过了工具许可筛选，就能调用工具函数了
             handler = TOOL_HANDLERS.get(tool_call.name)
             try:
                 output = handler(**arguments) if handler else f"错误：未知工具 {tool_call.name}"
             except Exception as e:
                 output = f"错误：{e}"
 
+            # 调用钩子，具体来说是调用PostToolUse钩子，即large_output_hook
             trigger_hooks("PostToolUse", tool_call.name, arguments, output)
 
             messages.append({
