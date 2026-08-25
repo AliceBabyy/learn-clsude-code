@@ -24,6 +24,7 @@ Harness 会在工具结果之后追加一条提醒消息。
 
 import ast
 import json
+import locale
 import os
 import subprocess
 from pathlib import Path
@@ -48,21 +49,41 @@ MODEL = os.getenv("OPENAI_MODEL_ID")
 if not MODEL:
     raise RuntimeError("缺少 OPENAI_MODEL_ID，请在项目根目录的 .env 中配置模型名称")
 
+# ----------------------------------------------------------------------------
+
 # s05 变化：系统提示中增加规划要求
 SYSTEM = (
     f"你是位于 {WORKDIR} 的编程智能体。"
-    "开始任何多步骤任务前，先使用 todo_write 规划步骤。"
+    "开始任何多步骤任务时，第一次工具调用必须包含 todo_write。"
+    "如果用户已经给出明确步骤，直接按这些步骤规划和执行，不要先检查课程源码。"
+    "文件读写和编辑优先使用专用文件工具，不要用 Bash 绕过。"
     "执行过程中及时更新任务状态。"
 )
 
 
 # -- 来自 s02-s04 的工具实现 --
 
+def decode_subprocess_output(data: bytes | None) -> str:
+    """兼容解码Windows子进程可能返回的UTF-8或本地编码输出。"""
+    if not data:
+        return ""
+
+    encodings = ("utf-8", locale.getpreferredencoding(False), "gb18030")
+    for encoding in dict.fromkeys(encodings):
+        try:
+            return data.decode(encoding)
+        except (UnicodeDecodeError, LookupError):
+            continue
+    return data.decode("utf-8", errors="replace")
+
+
 def run_bash(command: str) -> str:
     try:
         r = subprocess.run(command, shell=True, cwd=WORKDIR,
-                           capture_output=True, text=True, timeout=120)
-        out = (r.stdout + r.stderr).strip()
+                           capture_output=True, text=False, timeout=120)
+        stdout = decode_subprocess_output(r.stdout)
+        stderr = decode_subprocess_output(r.stderr)
+        out = (stdout + stderr).strip()
         return out[:50000] if out else "（没有输出）"
     except subprocess.TimeoutExpired:
         return "错误：执行超时（120 秒）"
@@ -107,16 +128,23 @@ def run_glob(pattern: str) -> str:
     except Exception as e:
         return f"错误：{e}"
 
-
+# ------------------------------------------------------------------------
 # -- s05 新增：由模型更新的结构化状态 --
 
 class TodoManager:
+    # 初始化待办事项列表
     def __init__(self):
         self.items: list[dict] = []
 
+    # 更新待办事项列表
+    # 就是经过一些验证，看看最新进行中的事项对不对；最后输出的还是一个待办事项列表，将列表
     def update(self, todos: list | str) -> str:
+        # 1. 获取待办事项列表
+        # isinstance 检查 todos 参数是否为字符串
+        # todos 参数必须是列表/json字符串，必须长度不超过 20
         if isinstance(todos, str):
             try:
+                # 将json解析成python对象，然后赋给todos
                 todos = json.loads(todos)
             except json.JSONDecodeError:
                 try:
@@ -129,19 +157,21 @@ class TodoManager:
         if len(todos) > 20:
             raise ValueError("最多允许 20 个待办事项")
 
-        validated = []
-        in_progress_count = 0
-        for index, todo in enumerate(todos):
-            if not isinstance(todo, dict):
+        # 2. 验证待办事项列表
+        validated = [] # 验证后的待办事项列表
+        in_progress_count = 0 # 正在进行中的待办事项数量
+        for index, todo in enumerate(todos): # enumerate 遍历可迭代对象，返回其索引和值
+            if not isinstance(todo, dict): # 检查todo是否为字典
                 raise ValueError(f"todos[{index}] 必须是对象")
 
-            content = str(todo.get("content", "")).strip()
-            status = str(todo.get("status", "pending")).lower()
-            if not content:
+            content = str(todo.get("content", "")).strip() # 获取待办事项内容 并去除首尾空格
+            status = str(todo.get("status", "pending")).lower() # 获取待办事项状态并转换为小写
+            if not content: # 检查内容是否为空
                 raise ValueError(f"todos[{index}] 缺少 content")
-            if status not in ("pending", "in_progress", "completed"):
-                raise ValueError(f"todos[{index}] 的状态 '{status}' 无效")
-            if status == "in_progress":
+            if status not in ("pending", "in_progress", "completed"): # 检查状态是否有效
+                raise ValueError(f"todos[{index}] 的状态 '{status}' 无效") # 状态无效时抛出错误
+            # 如果状态为进行中，则追加到进行事项列表
+            if status == "in_progress": # 检查状态是否为进行中
                 in_progress_count += 1
             validated.append({"content": content, "status": status})
 
@@ -149,29 +179,34 @@ class TodoManager:
             raise ValueError("同一时间只能有一个待办事项处于进行中")
 
         self.items = validated
-        return self.render()
+        return self.render() # 最终返回是调用了render，所以
 
+    # 渲染待办事项列表
+    # 得到更新后的待办事项列表即items，
     def render(self) -> str:
         if not self.items:
             return "没有待办事项。"
 
         lines = []
         for todo in self.items:
+            # 把任务状态取出来，给marker
             marker = {
                 "pending": "[ ]",
                 "in_progress": "[>]",
                 "completed": "[x]",
             }[todo["status"]]
-            lines.append(f"{marker} {todo['content']}")
+            lines.append(f"{marker} {todo['content']}") # 添加任务内容到lines列表
 
-        done = sum(todo["status"] == "completed" for todo in self.items)
+        done = sum(todo["status"] == "completed" for todo in self.items) # 计算已完成事项（列表生成式+sum函数）
         lines.append(f"\n（已完成 {done}/{len(self.items)}）")
-        return "\n".join(lines)
+        return "\n".join(lines) # "\n".join()是把可迭代对象用换行符连接起来，最终整体返回一个字符串
 
 
-TODO = TodoManager()
+TODO = TodoManager() # TODO 是 TodoManager 类的实例对象
 
-
+# 接收todos事项，更新待办事项
+# 实际上就是个壳子，核心调用了 TodoManager 类的 update，只是包了一层异常捕捉的壳子
+#最终返回结果还是update的返回，也就是render的返回
 def run_todo_write(todos: list | str) -> str:
     try:
         output = TODO.update(todos)
@@ -179,6 +214,8 @@ def run_todo_write(todos: list | str) -> str:
         return f"错误：{e}"
     print(f"\n\033[33m## 当前任务\033[0m\n{output}")
     return output
+
+# ---------------------------------------------------------------------
 
 TOOLS = [
     {"type": "function", "name": "bash", "description": "执行一条 Shell 命令。",
@@ -197,11 +234,15 @@ TOOLS = [
 ]
 
 TOOL_HANDLERS = {
-    "bash": run_bash, "read_file": run_read, "write_file": run_write,
-    "edit_file": run_edit, "glob": run_glob, "todo_write": run_todo_write,
+    "bash": run_bash,
+    "read_file": run_read,
+    "write_file": run_write,
+    "edit_file": run_edit,
+    "glob": run_glob,
+    "todo_write": run_todo_write,
 }
 
-
+# ---------------------------------------------------------------------
 # -- 来自 s04 的 Hook 系统 --
 
 HOOKS = {"UserPromptSubmit": [], "PreToolUse": [], "PostToolUse": [], "Stop": []}
@@ -271,17 +312,27 @@ def summary_hook(messages: list):
     print(f"\033[90m[HOOK] Stop：本次会话调用了 {tool_count} 次工具\033[0m")
     return None
 
+# 自定义钩子，用于输出调用工具的名字
+def tool_name_hook(tool_name: str, arguments: dict, output):
+    """PostToolUse：输出刚刚执行完成的工具名称。"""
+    print("\033[90m[HOOK] 此处调用 tool_name_hook，工具名字为：\033[0m")
+    print(f"\033[90m[HOOK] {tool_name}\033[0m")
+    return None
+
+
 register_hook("UserPromptSubmit", context_inject_hook)
 register_hook("PreToolUse", permission_hook)
 register_hook("PreToolUse", log_hook)
 register_hook("PostToolUse", large_output_hook)
+register_hook("PostToolUse", tool_name_hook)
 register_hook("Stop", summary_hook)
 
-
+# ---------------------------------------------------------------------
 # -- 带待办事项提醒计数器的智能体循环 --
 
 def agent_loop(messages: list):
-    rounds_since_todo = 0
+    rounds_since_todo = 0 # 轮数计数器，用于计数自上次使用待办事项工具以来的轮数
+    # 1. 调用模型生成响应，追加相应输出项到消息列表
     while True:
         response = client.responses.create(
             model=MODEL,
@@ -293,6 +344,7 @@ def agent_loop(messages: list):
         # 保留全部输出项，包括消息、推理项和函数调用，供下一轮完整回传。
         messages.extend(response.output)
 
+        # 2. 从响应中提取工具调用项，提取工具名称和参数
         tool_calls = [
             item for item in response.output if item.type == "function_call"
         ]
@@ -303,7 +355,8 @@ def agent_loop(messages: list):
                 continue
             return response.output_text
 
-        used_todo = False
+        # 3. 遍历工具调用项，调用钩子做权限检查，后调用工具函数并获取输出；做工具调用后的处理；追加工具调用结果
+        used_todo = False # 标记是否使用了待办事项工具；每轮循环重置为False
         for tool_call in tool_calls:
             arguments = json.loads(tool_call.arguments)
 
@@ -325,6 +378,7 @@ def agent_loop(messages: list):
 
             trigger_hooks("PostToolUse", tool_call.name, arguments, output)
 
+            # 如果使用了待办事项工具，则标记为已使用
             if tool_call.name == "todo_write":
                 used_todo = True
 
@@ -334,6 +388,7 @@ def agent_loop(messages: list):
                 "output": str(output),
             })
 
+        # 4. 提醒模型更新待办事项列表；保障至少每3轮提醒更新一次待办事项列表
         rounds_since_todo = 0 if used_todo else rounds_since_todo + 1
         if rounds_since_todo >= 3:
             messages.append({

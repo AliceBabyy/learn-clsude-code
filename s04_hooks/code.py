@@ -177,6 +177,7 @@ def permission_hook(tool_name: str, arguments: dict):
 # 2. PreToolUse - Log Hook：记录每次工具调用
 def log_hook(tool_name: str, arguments: dict):
     """PreToolUse：记录每次工具调用。"""
+    # 取arguments中所有的value值，转为list列表并只取前两个元素；把整个列表转为str字符串并只取前60个字符
     args_preview = str(list(arguments.values())[:2])[:60]
     print(f"\033[90m[HOOK] {tool_name}({args_preview})\033[0m")
     return None
