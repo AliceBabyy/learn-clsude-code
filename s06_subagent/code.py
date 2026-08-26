@@ -226,11 +226,14 @@ register_hook("Stop", summary_hook)
 
 # --------------------------------------------------------------------------------
 
+# 所有已注册的工具通过execute_tool调用
+# 接收参数：工具名称，工具参数，工具注册表
 def execute_tool(tool_name: str, arguments: dict, handlers: dict) -> str:
     blocked = trigger_hooks("PreToolUse", tool_name, arguments)
     if blocked:
         return str(blocked)
 
+    # 根据工具名字取注册表中找相应的处理函数，并调用处理函数
     handler = handlers.get(tool_name)
     try:
         output = handler(**arguments) if handler else f"错误：未知工具 {tool_name}"
@@ -238,6 +241,7 @@ def execute_tool(tool_name: str, arguments: dict, handlers: dict) -> str:
         output = f"错误：{e}"
 
     trigger_hooks("PostToolUse", tool_name, arguments, output)
+    # 返回结果为工具调用输出
     return str(output)
 
 # ----------------------------------------------------------------------------------
@@ -246,11 +250,13 @@ def execute_tool(tool_name: str, arguments: dict, handlers: dict) -> str:
 SUB_TOOLS = list(BASE_TOOLS)
 SUB_HANDLERS = dict(BASE_HANDLERS)
 
-
+# -- 子智能体 --
+# 接收参数prompt为用户问题
 def run_subagent(prompt: str) -> str:
     print("\n\033[35m[子智能体已启动]\033[0m")
     messages = [{"role": "user", "content": prompt}]
 
+    # 主循环，最多循环30轮
     for _ in range(30):
         response = client.responses.create(
             model=MODEL,
@@ -297,7 +303,12 @@ TASK_TOOL = {
     },
 }
 
+# 定义工具（所有定义好的工具都是放在一个列表里）
+# 把BASE_TOOLS解包，跟TASK_TOOL拼成一个新列表，命名为TOOLS
 TOOLS = [*BASE_TOOLS, TASK_TOOL]
+
+# 注册工具
+# **是字典解包。这是把 BASE_HANDLERS 解包后跟字典 "task": run_subagent 拼一起，命名为TOOL_HANDLERS
 TOOL_HANDLERS = {**BASE_HANDLERS, "task": run_subagent}
 
 # --------------------------------------------------------------------------
@@ -326,6 +337,7 @@ def agent_loop(messages: list):
 
         for tool_call in tool_calls:
             arguments = json.loads(tool_call.arguments)
+            # 已注册的工具通过execute_tool调用
             output = execute_tool(tool_call.name, arguments, TOOL_HANDLERS)
             messages.append({
                 "type": "function_call_output",
