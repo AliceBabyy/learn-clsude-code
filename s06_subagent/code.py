@@ -236,6 +236,7 @@ def execute_tool(tool_name: str, arguments: dict, handlers: dict) -> str:
     # 根据工具名字取注册表中找相应的处理函数，并调用处理函数
     handler = handlers.get(tool_name)
     try:
+        # handler 就是工具函数的名字了，**arguments是将参数解包后当做参数传给工具函数
         output = handler(**arguments) if handler else f"错误：未知工具 {tool_name}"
     except Exception as e:
         output = f"错误：{e}"
@@ -251,7 +252,7 @@ SUB_TOOLS = list(BASE_TOOLS)
 SUB_HANDLERS = dict(BASE_HANDLERS)
 
 # -- 子智能体 --
-# 接收参数prompt为用户问题
+# 一般来讲，这里接收参数 prompt 其实就是要调用工具对应的参数arguments
 def run_subagent(prompt: str) -> str:
     print("\n\033[35m[子智能体已启动]\033[0m")
     messages = [{"role": "user", "content": prompt}]
