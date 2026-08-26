@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
 """
-s06_subagent.py - Subagents
+s06_subagent.py - 子智能体
 
-The task tool runs a second agent loop with a fresh message list. Both
-loops share the working directory, but only the final text returns to
-the parent conversation.
+task 工具使用全新的消息列表运行第二个智能体循环。父子循环共享
+工作目录，但只有子智能体的最终文本会返回父对话。
 
-    Parent agent                    Subagent
+    父智能体                        子智能体
     +------------------+            +------------------+
     | messages=[...]   |            | messages=[prompt]|
     |                  |   task     |                  |
-    | tool: task       | ---------> | own agent loop   |
-    |                  |            | base tools only  |
-    | tool_result      | <--------- | final text       |
+    | 工具: task       | ---------> | 独立智能体循环   |
+    |                  |            | 仅基础工具       |
+    | 工具结果         | <--------- | 最终文本         |
     +------------------+            +------------------+
 
-The subagent has no task tool, so it cannot delegate again.
+子智能体没有 task 工具，因此不能再次委派。
 """
 
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -31,49 +31,56 @@ try:
 except ImportError:
     pass
 
-from anthropic import Anthropic
+from openai import OpenAI
 from dotenv import load_dotenv
 
 load_dotenv(override=True)
-if os.getenv("ANTHROPIC_BASE_URL"):
-    os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
 
 WORKDIR = Path.cwd()
-client = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL"))
-MODEL = os.environ["MODEL_ID"]
+client = OpenAI(
+    api_key=os.getenv("OPENAI_API_KEY"),
+    base_url=os.getenv("OPENAI_BASE_URL") or None,
+)
+MODEL = os.getenv("OPENAI_MODEL_ID")
+if not MODEL:
+    raise RuntimeError("缺少 OPENAI_MODEL_ID，请在项目根目录的 .env 中配置模型名称")
+
+# -----------------------------------------------------------------------
+# --提示词--
 
 SYSTEM = (
-    f"You are a coding agent at {WORKDIR}. "
-    "Use task for focused exploration or a self-contained subtask."
+    f"你是位于 {WORKDIR} 的编程智能体。"
+    "使用 task 工具处理聚焦的探索任务或边界清晰的独立子任务。"
 )
 SUB_SYSTEM = (
-    f"You are a coding agent at {WORKDIR}. "
-    "Complete the given task, then return a concise final answer."
+    f"你是位于 {WORKDIR} 的编程智能体。"
+    "完成给定任务，然后返回简洁的最终答案。"
 )
 
-
-# -- Base tools --
+# -------------------------------------------------------------------------
+# -- 基础工具 --
 
 def run_bash(command: str) -> str:
     try:
         result = subprocess.run(
             command, shell=True, cwd=WORKDIR,
-            capture_output=True, text=True, timeout=120,
+            capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=120,
         )
         output = (result.stdout + result.stderr).strip()
-        return output[:50000] if output else "(no output)"
+        return output[:50000] if output else "（没有输出）"
     except subprocess.TimeoutExpired:
-        return "Error: Timeout (120s)"
+        return "错误：执行超时（120 秒）"
 
 
 def run_read(path: str, limit: int | None = None) -> str:
     try:
         lines = (WORKDIR / path).resolve().read_text().splitlines()
         if limit and limit < len(lines):
-            lines = lines[:limit] + [f"... ({len(lines) - limit} more lines)"]
+            lines = lines[:limit] + [f"...（还有 {len(lines) - limit} 行）"]
         return "\n".join(lines)
     except Exception as e:
-        return f"Error: {e}"
+        return f"错误：{e}"
 
 
 def run_write(path: str, content: str) -> str:
@@ -81,9 +88,9 @@ def run_write(path: str, content: str) -> str:
         file_path = (WORKDIR / path).resolve()
         file_path.parent.mkdir(parents=True, exist_ok=True)
         file_path.write_text(content)
-        return f"Wrote {len(content)} bytes to {path}"
+        return f"已向 {path} 写入 {len(content)} 字节"
     except Exception as e:
-        return f"Error: {e}"
+        return f"错误：{e}"
 
 
 def run_edit(path: str, old_text: str, new_text: str) -> str:
@@ -91,11 +98,11 @@ def run_edit(path: str, old_text: str, new_text: str) -> str:
         file_path = (WORKDIR / path).resolve()
         text = file_path.read_text()
         if old_text not in text:
-            return f"Error: text not found in {path}"
+            return f"错误：在 {path} 中未找到指定文本"
         file_path.write_text(text.replace(old_text, new_text, 1))
-        return f"Edited {path}"
+        return f"已编辑 {path}"
     except Exception as e:
-        return f"Error: {e}"
+        return f"错误：{e}"
 
 
 def run_glob(pattern: str) -> str:
@@ -105,22 +112,22 @@ def run_glob(pattern: str) -> str:
         for match in glob.glob(pattern, root_dir=WORKDIR):
             if (WORKDIR / match).resolve().is_relative_to(WORKDIR):
                 matches.append(match)
-        return "\n".join(matches) if matches else "(no matches)"
+        return "\n".join(matches) if matches else "（没有匹配项）"
     except Exception as e:
-        return f"Error: {e}"
+        return f"错误：{e}"
 
 
 BASE_TOOLS = [
-    {"name": "bash", "description": "Run a shell command.",
-     "input_schema": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}},
-    {"name": "read_file", "description": "Read file contents.",
-     "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "limit": {"type": "integer"}}, "required": ["path"]}},
-    {"name": "write_file", "description": "Write content to a file.",
-     "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}},
-    {"name": "edit_file", "description": "Replace exact text in a file once.",
-     "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "old_text": {"type": "string"}, "new_text": {"type": "string"}}, "required": ["path", "old_text", "new_text"]}},
-    {"name": "glob", "description": "Find files matching a glob pattern.",
-     "input_schema": {"type": "object", "properties": {"pattern": {"type": "string"}}, "required": ["pattern"]}},
+    {"type": "function", "name": "bash", "description": "执行一条 Shell 命令。",
+     "parameters": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}},
+    {"type": "function", "name": "read_file", "description": "读取文件内容。",
+     "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "limit": {"type": "integer"}}, "required": ["path"]}},
+    {"type": "function", "name": "write_file", "description": "将内容写入文件。",
+     "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}},
+    {"type": "function", "name": "edit_file", "description": "精确替换文件中首次出现的指定文本。",
+     "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "old_text": {"type": "string"}, "new_text": {"type": "string"}}, "required": ["path", "old_text", "new_text"]}},
+    {"type": "function", "name": "glob", "description": "查找与 glob 模式匹配的文件。",
+     "parameters": {"type": "object", "properties": {"pattern": {"type": "string"}}, "required": ["pattern"]}},
 ]
 
 BASE_HANDLERS = {
@@ -131,8 +138,8 @@ BASE_HANDLERS = {
     "glob": run_glob,
 }
 
-
-# -- Hooks --
+# ------------------------------------------------------------------------------
+# -- Hook系统 --
 
 HOOKS = {"UserPromptSubmit": [], "PreToolUse": [], "PostToolUse": [], "Stop": []}
 
@@ -153,66 +160,61 @@ DENY_LIST = ["rm -rf /", "sudo", "shutdown", "reboot", "mkfs", "dd if="]
 DESTRUCTIVE = ["rm ", "> /etc/", "chmod 777"]
 
 
-def permission_hook(block):
-    """PreToolUse: block denied operations and ask about risky ones."""
-    if block.name == "bash":
-        command = block.input.get("command", "")
+def permission_hook(tool_name: str, arguments: dict):
+    """PreToolUse：阻止禁止操作，并对风险操作请求确认。"""
+    if tool_name == "bash":
+        command = arguments.get("command", "")
         for pattern in DENY_LIST:
             if pattern in command:
-                print(f"\n\033[31m[blocked] '{pattern}'\033[0m")
-                return "Permission denied by deny list"
+                print(f"\n\033[31m[已阻止] '{pattern}'\033[0m")
+                return "权限拒绝：命令命中禁止列表"
         for keyword in DESTRUCTIVE:
             if keyword in command:
-                print("\n\033[33m[permission] Potentially destructive command\033[0m")
-                print(f"   Tool: {block.name}({block.input})")
-                choice = input("   Allow? [y/N] ").strip().lower()
+                print("\n\033[33m[权限确认] 可能具有破坏性的命令\033[0m")
+                print(f"   工具：{tool_name}({arguments})")
+                choice = input("   是否允许？[y/N] ").strip().lower()
                 if choice not in ("y", "yes"):
-                    return "Permission denied by user"
+                    return "权限拒绝：用户未授权"
 
-    if block.name in ("read_file", "write_file", "edit_file"):
-        path = block.input.get("path", "")
+    if tool_name in ("read_file", "write_file", "edit_file"):
+        path = arguments.get("path", "")
         if not (WORKDIR / path).resolve().is_relative_to(WORKDIR):
-            print("\n\033[33m[permission] Access outside workspace\033[0m")
-            print(f"   Tool: {block.name}({block.input})")
-            choice = input("   Allow? [y/N] ").strip().lower()
+            print("\n\033[33m[权限确认] 正在访问工作区外部\033[0m")
+            print(f"   工具：{tool_name}({arguments})")
+            choice = input("   是否允许？[y/N] ").strip().lower()
             if choice not in ("y", "yes"):
-                return "Permission denied by user"
+                return "权限拒绝：用户未授权"
     return None
 
 
-def log_hook(block):
-    """PreToolUse: log every tool call."""
-    args_preview = str(list(block.input.values())[:2])[:60]
-    print(f"\033[90m[HOOK] {block.name}({args_preview})\033[0m")
+def log_hook(tool_name: str, arguments: dict):
+    """PreToolUse：记录每次工具调用。"""
+    args_preview = str(list(arguments.values())[:2])[:60]
+    print(f"\033[90m[HOOK] {tool_name}({args_preview})\033[0m")
     return None
 
 
-def large_output_hook(block, output):
-    """PostToolUse: warn on large output."""
+def large_output_hook(tool_name: str, arguments: dict, output):
+    """PostToolUse：工具输出过大时发出警告。"""
     if len(str(output)) > 100000:
-        print(f"\033[33m[HOOK] Large output from {block.name}: {len(str(output))} chars\033[0m")
+        print(f"\033[33m[HOOK] {tool_name} 输出过大：{len(str(output))} 个字符\033[0m")
     return None
 
 
 def context_inject_hook(query: str):
-    """UserPromptSubmit: log the working directory."""
-    print(f"\033[90m[HOOK] UserPromptSubmit: working in {WORKDIR}\033[0m")
+    """UserPromptSubmit：记录当前工作目录。"""
+    print(f"\033[90m[HOOK] UserPromptSubmit：当前工作目录为 {WORKDIR}\033[0m")
     return None
 
 
 def summary_hook(messages: list):
-    """Stop: print the number of tool results in this message list."""
+    """Stop：打印当前消息列表中的工具调用次数。"""
     tool_count = sum(
-        1
-        for message in messages
-        for block in (
-            message.get("content")
-            if isinstance(message.get("content"), list)
-            else []
-        )
-        if isinstance(block, dict) and block.get("type") == "tool_result"
+        1 for item in messages
+        if (item.get("type") if isinstance(item, dict) else getattr(item, "type", None))
+        == "function_call"
     )
-    print(f"\033[90m[HOOK] Stop: session used {tool_count} tool calls\033[0m")
+    print(f"\033[90m[HOOK] Stop：本次上下文调用了 {tool_count} 次工具\033[0m")
     return None
 
 
@@ -222,82 +224,73 @@ register_hook("PreToolUse", log_hook)
 register_hook("PostToolUse", large_output_hook)
 register_hook("Stop", summary_hook)
 
+# --------------------------------------------------------------------------------
 
-def execute_tool(block, handlers: dict) -> str:
-    blocked = trigger_hooks("PreToolUse", block)
+def execute_tool(tool_name: str, arguments: dict, handlers: dict) -> str:
+    blocked = trigger_hooks("PreToolUse", tool_name, arguments)
     if blocked:
         return str(blocked)
 
-    handler = handlers.get(block.name)
+    handler = handlers.get(tool_name)
     try:
-        output = handler(**block.input) if handler else f"Unknown: {block.name}"
+        output = handler(**arguments) if handler else f"错误：未知工具 {tool_name}"
     except Exception as e:
-        output = f"Error: {e}"
+        output = f"错误：{e}"
 
-    trigger_hooks("PostToolUse", block, output)
+    trigger_hooks("PostToolUse", tool_name, arguments, output)
     return str(output)
 
-
-# -- New in s06: a nested agent loop with fresh messages --
+# ----------------------------------------------------------------------------------
+# -- s06新增：使用全新消息列表的嵌套智能体循环 --
 
 SUB_TOOLS = list(BASE_TOOLS)
 SUB_HANDLERS = dict(BASE_HANDLERS)
 
 
-def extract_text(content) -> str:
-    if not isinstance(content, list):
-        return str(content)
-    return "\n".join(
-        getattr(block, "text", "")
-        for block in content
-        if getattr(block, "type", None) == "text"
-    )
-
-
 def run_subagent(prompt: str) -> str:
-    print("\n\033[35m[Subagent started]\033[0m")
+    print("\n\033[35m[子智能体已启动]\033[0m")
     messages = [{"role": "user", "content": prompt}]
 
     for _ in range(30):
-        response = client.messages.create(
+        response = client.responses.create(
             model=MODEL,
-            system=SUB_SYSTEM,
-            messages=messages,
+            instructions=SUB_SYSTEM,
+            input=messages,
             tools=SUB_TOOLS,
-            max_tokens=8000,
+            max_output_tokens=8000,
         )
-        messages.append({"role": "assistant", "content": response.content})
+        messages.extend(response.output)
 
         tool_calls = [
-            block for block in response.content if block.type == "tool_use"
+            item for item in response.output if item.type == "function_call"
         ]
         if not tool_calls:
             force = trigger_hooks("Stop", messages)
             if force:
                 messages.append({"role": "user", "content": force})
                 continue
-            print("\033[35m[Subagent done]\033[0m")
-            return extract_text(response.content) or "(no summary)"
+            print("\033[35m[子智能体已完成]\033[0m")
+            return response.output_text or "（没有总结）"
 
-        results = []
-        for block in tool_calls:
-            output = execute_tool(block, SUB_HANDLERS)
-            print(f"  \033[90m[sub] {block.name}: {output[:100]}\033[0m")
-            results.append({
-                "type": "tool_result",
-                "tool_use_id": block.id,
-                "content": output,
+        for tool_call in tool_calls:
+            arguments = json.loads(tool_call.arguments)
+            output = execute_tool(tool_call.name, arguments, SUB_HANDLERS)
+            print(f"  \033[90m[子] {tool_call.name}: {output[:100]}\033[0m")
+            messages.append({
+                "type": "function_call_output",
+                "call_id": tool_call.call_id,
+                "output": output,
             })
-        messages.append({"role": "user", "content": results})
 
-    print("\033[35m[Subagent stopped]\033[0m")
-    return "Subagent stopped after 30 turns without a final answer."
+    print("\033[35m[子智能体已停止]\033[0m")
+    return "子智能体运行30轮后仍未生成最终答案，已停止。"
 
 
 TASK_TOOL = {
+    "type": "function",
     "name": "task",
-    "description": "Run a subagent with fresh conversation context and return its final text.",
-    "input_schema": {
+    "description": "使用全新的对话上下文运行子智能体，并返回其最终文本。",
+    "parameters": {
         "type": "object",
         "properties": {"prompt": {"type": "string", "minLength": 1}},
         "required": ["prompt"],
@@ -307,44 +300,44 @@ TASK_TOOL = {
 TOOLS = [*BASE_TOOLS, TASK_TOOL]
 TOOL_HANDLERS = {**BASE_HANDLERS, "task": run_subagent}
 
-
-# -- Parent agent loop --
+# --------------------------------------------------------------------------
+# -- 父智能体循环 --
 
 def agent_loop(messages: list):
     while True:
-        response = client.messages.create(
+        response = client.responses.create(
             model=MODEL,
-            system=SYSTEM,
-            messages=messages,
+            instructions=SYSTEM,
+            input=messages,
             tools=TOOLS,
-            max_tokens=8000,
+            max_output_tokens=8000,
         )
-        messages.append({"role": "assistant", "content": response.content})
+        messages.extend(response.output)
 
         tool_calls = [
-            block for block in response.content if block.type == "tool_use"
+            item for item in response.output if item.type == "function_call"
         ]
         if not tool_calls:
             force = trigger_hooks("Stop", messages)
             if force:
                 messages.append({"role": "user", "content": force})
                 continue
-            return
+            return response.output_text
 
-        results = []
-        for block in tool_calls:
-            output = execute_tool(block, TOOL_HANDLERS)
-            results.append({
-                "type": "tool_result",
-                "tool_use_id": block.id,
-                "content": output,
+        for tool_call in tool_calls:
+            arguments = json.loads(tool_call.arguments)
+            output = execute_tool(tool_call.name, arguments, TOOL_HANDLERS)
+            messages.append({
+                "type": "function_call_output",
+                "call_id": tool_call.call_id,
+                "output": output,
             })
-        messages.append({"role": "user", "content": results})
 
 
 if __name__ == "__main__":
-    print("s06: Subagent - fresh messages, final text returns")
-    print("Enter a question, press Enter to send. Type q to quit.\n")
+    print("s06：子智能体 - 使用独立消息上下文，只返回最终文本")
+    print("输入问题后按回车发送，输入 q 或 exit 退出。\n")
+    print(f"请求地址：{client.base_url}responses")
 
     history = []
     while True:
@@ -356,8 +349,7 @@ if __name__ == "__main__":
             break
         trigger_hooks("UserPromptSubmit", query)
         history.append({"role": "user", "content": query})
-        agent_loop(history)
-        for block in history[-1]["content"]:
-            if getattr(block, "type", None) == "text":
-                print(block.text)
+        final_text = agent_loop(history)
+        if final_text:
+            print(final_text)
         print()
