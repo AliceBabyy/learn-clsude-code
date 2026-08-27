@@ -50,10 +50,12 @@ MODEL = os.getenv("OPENAI_MODEL_ID")
 if not MODEL:
     raise RuntimeError("缺少 OPENAI_MODEL_ID，请在项目根目录的 .env 中配置模型名称")
 
-
-# -- 技能目录 --
+# -- 正文 --
+# ------------------------------------------------------------------------------
+# -- skils 技能目录 --
 
 class SkillLoader:
+    # 初始化参数：
     def __init__(self, skills_dir: Path):
         self.skills_dir = skills_dir
         self.skills: dict[str, dict[str, str]] = {}
@@ -127,6 +129,8 @@ class SkillLoader:
 
 SKILL_LOADER = SkillLoader(SKILLS_DIR)
 
+# ------------------------------------------------------------------------------
+# 提示词
 
 def build_system_prompt() -> str:
     return (
@@ -139,7 +143,7 @@ def build_system_prompt() -> str:
 
 SYSTEM = build_system_prompt()
 
-
+# ------------------------------------------------------------------------------
 # -- 工具 --
 
 def run_bash(command: str) -> str:
@@ -222,7 +226,7 @@ TOOL_HANDLERS = {
     "load_skill": SKILL_LOADER.load,
 }
 
-
+# ------------------------------------------------------------------------------
 # -- 钩子 --
 
 HOOKS = {"UserPromptSubmit": [], "PreToolUse": [], "PostToolUse": [], "Stop": []}
@@ -309,6 +313,7 @@ register_hook("PreToolUse", log_hook)
 register_hook("PostToolUse", large_output_hook)
 register_hook("Stop", summary_hook)
 
+# ------------------------------------------------------------------------------
 
 def execute_tool(tool_name: str, arguments: dict) -> str:
     blocked = trigger_hooks("PreToolUse", tool_name, arguments)
@@ -326,6 +331,7 @@ def execute_tool(tool_name: str, arguments: dict) -> str:
     trigger_hooks("PostToolUse", tool_name, arguments, output)
     return str(output)
 
+# ------------------------------------------------------------------------------
 
 def agent_loop(messages: list):
     while True:
