@@ -241,25 +241,40 @@ class ContextCompactor:
     KEEP_RECENT_RESULTS = 3
     KEEP_RECENT_MESSAGES = 5
 
+    # 核心作用：初始化上下文压缩器及其依赖目录。
+    # 接收参数：模型客户端、模型名、记录目录、工具结果目录。
+    # 返回内容：无，完成实例属性初始化。
     def __init__(self, llm_client, model: str, transcript_dir: Path, tool_results_dir: Path):
         self.client = llm_client
         self.model = model
         self.transcript_dir = transcript_dir
         self.tool_results_dir = tool_results_dir
 
+    # 核心作用：为无法直接JSON序列化的对象提供兜底转换。
+    # 接收参数：待序列化的对象value。
+    # 返回内容：模型对象的JSON字典或对象字符串。
     @staticmethod
     def json_default(value):
         model_dump = getattr(value, "model_dump", None)
         return model_dump(mode="json") if callable(model_dump) else str(value)
 
+    # 核心作用：估算消息列表的字符长度。
+    # 接收参数：消息列表messages。
+    # 返回内容：序列化后的字符数整数。
     @classmethod
     def estimate_chars(cls, messages: list) -> int:
         return len(json.dumps(messages, default=cls.json_default, ensure_ascii=False))
 
+    # 核心作用：统一读取字典或SDK对象中的字段。
+    # 接收参数：对象item、字段名key、默认值default。
+    # 返回内容：字段值或默认值。
     @staticmethod
     def item_value(item, key: str, default=None):
         return item.get(key, default) if isinstance(item, dict) else getattr(item, key, default)
 
+    # 核心作用：统一修改字典或SDK对象中的字段。
+    # 接收参数：对象item、字段名key、新值value。
+    # 返回内容：无，直接修改传入对象。
     @staticmethod
     def set_item_value(item, key: str, value) -> None:
         if isinstance(item, dict):
@@ -267,14 +282,23 @@ class ContextCompactor:
         else:
             setattr(item, key, value)
 
+    # 核心作用：读取消息项的类型字段。
+    # 接收参数：消息项item。
+    # 返回内容：消息类型字符串或None。
     @classmethod
     def item_type(cls, item) -> str | None:
         return cls.item_value(item, "type")
 
+    # 核心作用：读取工具调用或结果的关联ID。
+    # 接收参数：消息项item。
+    # 返回内容：call_id字符串或None。
     @classmethod
     def call_id(cls, item) -> str | None:
         return cls.item_value(item, "call_id")
 
+    # 核心作用：找出最近一次模型响应之后尚未被读取的工具结果。
+    # 接收参数：完整消息列表messages。
+    # 返回内容：未读function_call_output的位置集合。
     @classmethod
     def unseen_tool_result_positions(cls, messages: list) -> set[int]:
         """返回模型最近一次响应之后新增、尚未被模型读取的工具结果位置。"""
@@ -289,6 +313,9 @@ class ContextCompactor:
             if cls.item_type(messages[index]) == "function_call_output"
         }
 
+    # 核心作用：按模型输出和工具结果识别完整响应批次。
+    # 接收参数：完整消息列表messages。
+    # 返回内容：由起止下标组成的响应区间列表。
     @classmethod
     def response_spans(cls, messages: list) -> list[tuple[int, int]]:
         """返回模型输出及其函数结果构成的完整批次边界。"""
@@ -315,6 +342,9 @@ class ContextCompactor:
             spans.append((start, index))
         return spans
 
+    # 核心作用：向后移动头部边界，避免拆开响应批次。
+    # 接收参数：消息列表messages、初始头部边界head_end。
+    # 返回内容：调整后的头部边界下标。
     @classmethod
     def paired_head_end(cls, messages: list, head_end: int) -> int:
         """向后扩展头部边界，避免拆开完整模型响应批次。"""
@@ -323,6 +353,9 @@ class ContextCompactor:
                 return end
         return head_end
 
+    # 核心作用：向前移动尾部边界，避免拆开响应批次。
+    # 接收参数：消息列表messages、初始尾部边界tail_start。
+    # 返回内容：调整后的尾部边界下标。
     @classmethod
     def paired_tail_start(cls, messages: list, tail_start: int) -> int:
         """向前扩展尾部边界，避免拆开完整模型响应批次。"""
@@ -331,6 +364,9 @@ class ContextCompactor:
                 return start
         return tail_start
 
+    # 核心作用：将完整消息记录持久化为JSONL文件。
+    # 接收参数：消息列表messages。
+    # 返回内容：生成的记录文件路径。
     def write_transcript(self, messages: list) -> Path:
         self.transcript_dir.mkdir(parents=True, exist_ok=True)
         path = self.transcript_dir / f"transcript_{uuid.uuid4().hex}.jsonl"
@@ -341,6 +377,9 @@ class ContextCompactor:
                 ) + "\n")
         return path
 
+    # 核心作用：将过大的工具输出落盘并保留可读预览。
+    # 接收参数：工具调用ID call_id、工具输出output。
+    # 返回内容：原输出或包含文件路径和预览的替代文本。
     def persist_large_output(self, call_id: str, output: str) -> str:
         if len(output) <= self.LARGE_RESULT_CHAR_LIMIT:
             return output
@@ -351,6 +390,9 @@ class ContextCompactor:
             path.write_text(output, encoding="utf-8")
         return f"<persisted-output>\n完整输出：{path}\n预览：\n{output[:2000]}\n</persisted-output>"
 
+    # 核心作用：限制工具结果总量，并优先持久化旧的大结果。
+    # 接收参数：消息列表messages、可选字符上限max_chars。
+    # 返回内容：处理后的消息列表。
     def tool_result_budget(self, messages: list, max_chars: int | None = None) -> list:
         if not messages:
             return messages
@@ -378,6 +420,9 @@ class ContextCompactor:
                         for _, entry in results)
         return messages
 
+    # 核心作用：归档过长消息的中间部分，保留头尾上下文。
+    # 接收参数：消息列表messages、最大消息数max_messages。
+    # 返回内容：裁剪并插入归档标记后的消息列表。
     def snip_compact(self, messages: list, max_messages: int = 50) -> list:
         if len(messages) <= max_messages:
             return messages
@@ -392,6 +437,9 @@ class ContextCompactor:
                   f"[已将 {tail_start - head_end} 条消息归档到 {transcript_path}]"}
         return [*messages[:head_end], marker, *messages[tail_start:]]
 
+    # 核心作用：缩短已被模型消费的旧工具结果。
+    # 接收参数：消息列表messages。
+    # 返回内容：旧结果被替换为摘要标记的消息列表。
     def micro_compact(self, messages: list) -> list:
         results = [
             (index, item) for index, item in enumerate(messages)
@@ -414,6 +462,9 @@ class ContextCompactor:
             ))
         return messages
 
+    # 核心作用：生成供摘要模型使用且受长度限制的对话文本。
+    # 接收参数：消息列表messages。
+    # 返回内容：JSON格式的摘要输入字符串。
     def summary_input(self, messages: list) -> str:
         conversation = json.dumps(
             messages, default=self.json_default, ensure_ascii=False
@@ -426,6 +477,9 @@ class ContextCompactor:
                 + "\n...[中间内容已省略，完整记录已保存到磁盘]...\n"
                 + conversation[-tail:])
 
+    # 核心作用：调用模型将历史对话总结为事实状态。
+    # 接收参数：需要总结的消息列表messages。
+    # 返回内容：摘要文本字符串。
     def summarize_history(self, messages: list) -> str:
         response = self.client.responses.create(
             model=self.model,
@@ -439,6 +493,9 @@ class ContextCompactor:
         )
         return response.output_text.strip() or "（摘要为空）"
 
+    # 核心作用：构造包含当前请求、摘要和记录路径的压缩消息。
+    # 接收参数：标签label、当前请求request、摘要summary、记录路径transcript。
+    # 返回内容：可重新注入模型上下文的用户消息字典。
     @staticmethod
     def summary_message(label: str, request: str, summary: str, transcript: Path) -> dict:
         return {"role": "user", "content": (
@@ -447,12 +504,18 @@ class ContextCompactor:
             f"完整记录：{transcript}"
         )}
 
+    # 核心作用：归档全部历史并用模型摘要替换上下文。
+    # 接收参数：消息列表messages、当前请求active_request。
+    # 返回内容：仅包含压缩摘要消息的列表。
     def compact_history(self, messages: list, active_request: str) -> list:
         transcript = self.write_transcript(messages)
         print(f"[完整记录已保存：{transcript}]")
         summary = self.summarize_history(messages)
         return [self.summary_message("已压缩", active_request, summary, transcript)]
 
+    # 核心作用：上下文超限时保留近期消息并压缩旧历史。
+    # 接收参数：消息列表messages、当前请求active_request。
+    # 返回内容：摘要消息与安全保留尾部组成的列表。
     def reactive_compact(self, messages: list, active_request: str) -> list:
         transcript = self.write_transcript(messages)
         print(f"[完整记录已保存：{transcript}]")
@@ -463,6 +526,9 @@ class ContextCompactor:
         message = self.summary_message("补救压缩", active_request, summary, transcript)
         return [message, *messages[tail_start:]] if tail_start else [message]
 
+    # 核心作用：按四层顺序准备下一次模型调用的上下文。
+    # 接收参数：消息列表messages、当前请求active_request。
+    # 返回内容：预算控制、裁剪、微压缩或完整压缩后的消息列表。
     def prepare(self, messages: list, active_request: str) -> list:
         messages = self.tool_result_budget(messages)
         messages = self.snip_compact(messages)
