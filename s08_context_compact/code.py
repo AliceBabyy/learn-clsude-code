@@ -396,12 +396,15 @@ class ContextCompactor:
     def tool_result_budget(self, messages: list, max_chars: int | None = None) -> list:
         if not messages:
             return messages
+
         results = [
             (index, item) for index, item in enumerate(messages)
             if self.item_type(item) == "function_call_output"
         ]
+
         limit = max_chars or self.TOOL_RESULT_BATCH_CHAR_LIMIT
         total = sum(len(str(self.item_value(item, "output", ""))) for _, item in results)
+
         for _, item in sorted(
                 results,
                 key=lambda entry: len(str(self.item_value(entry[1], "output", ""))),
