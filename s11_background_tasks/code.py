@@ -30,20 +30,20 @@ try:
 except ImportError:
     pass
 
-from anthropic import Anthropic
+import json
+from openai import OpenAI
 from dotenv import load_dotenv
 
 load_dotenv(override=True)
-if os.getenv("ANTHROPIC_BASE_URL"):
-    os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
-
 WORKDIR = Path.cwd()
-client = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL"))
-MODEL = os.environ["MODEL_ID"]
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"), base_url=os.getenv("OPENAI_BASE_URL") or None)
+MODEL = os.getenv("OPENAI_MODEL_ID")
+if not MODEL:
+    raise RuntimeError("缺少 OPENAI_MODEL_ID，请在项目根目录的 .env 中配置模型名称")
 
 SYSTEM = (
-    f"You are a coding agent at {WORKDIR}. Use tools to solve tasks. "
-    "Set run_in_background to true only for independent Bash commands."
+    f"你是位于 {WORKDIR} 的编程智能体。使用工具解决任务。"
+    "只有独立的 Bash 命令才设置 run_in_background=true。"
 )
 
 
@@ -88,18 +88,18 @@ def _run_bash_process(command: str) -> tuple[str, int | None]:
             cwd=WORKDIR,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=True,
+            text=True, encoding="utf-8", errors="replace",
             start_new_session=True,
         )
         with _shell_process_lock:
             _shell_processes.add(process)
         stdout, stderr = process.communicate(timeout=120)
         output = (stdout + stderr).strip()
-        return (output[:50000] if output else "(no output)"), process.returncode
+        return (output[:50000] if output else "（没有输出）"), process.returncode
     except subprocess.TimeoutExpired:
-        return "Error: Timeout (120s)", None
+        return "错误：执行超时（120 秒）", None
     except OSError as error:
-        return f"Error: {type(error).__name__}: {error}", None
+        return f"错误：{type(error).__name__}: {error}", None
     finally:
         if process is not None:
             _stop_process_group(process)
@@ -114,7 +114,7 @@ def _run_bash_process(command: str) -> tuple[str, int | None]:
 def _format_bash_result(output: str, exit_code: int | None) -> str:
     if exit_code in (0, None):
         return output
-    return f"Error: command exited with status {exit_code}\n{output}"
+    return f"错误：命令以状态码 {exit_code} 退出\n{output}"
 
 
 def run_bash(command: str, run_in_background: bool = False) -> str:
@@ -126,10 +126,10 @@ def run_read(path: str, limit: int | None = None) -> str:
         file_path = (WORKDIR / path).resolve()
         lines = file_path.read_text().splitlines()
         if limit and limit < len(lines):
-            lines = lines[:limit] + [f"... ({len(lines) - limit} more lines)"]
+            lines = lines[:limit] + [f"...（还有 {len(lines) - limit} 行）"]
         return "\n".join(lines)
     except Exception as error:
-        return f"Error: {error}"
+        return f"错误：{error}"
 
 
 def run_write(path: str, content: str) -> str:
@@ -137,9 +137,9 @@ def run_write(path: str, content: str) -> str:
         file_path = (WORKDIR / path).resolve()
         file_path.parent.mkdir(parents=True, exist_ok=True)
         file_path.write_text(content)
-        return f"Wrote {len(content)} bytes to {path}"
+        return f"已向 {path} 写入 {len(content)} 字节"
     except Exception as error:
-        return f"Error: {error}"
+        return f"错误：{error}"
 
 
 def run_edit(path: str, old_text: str, new_text: str) -> str:
@@ -147,11 +147,11 @@ def run_edit(path: str, old_text: str, new_text: str) -> str:
         file_path = (WORKDIR / path).resolve()
         text = file_path.read_text()
         if old_text not in text:
-            return f"Error: text not found in {path}"
+            return f"错误：在 {path} 中未找到指定文本"
         file_path.write_text(text.replace(old_text, new_text, 1))
-        return f"Edited {path}"
+        return f"已编辑 {path}"
     except Exception as error:
-        return f"Error: {error}"
+        return f"错误：{error}"
 
 
 def run_glob(pattern: str) -> str:
@@ -161,9 +161,9 @@ def run_glob(pattern: str) -> str:
             for match in glob.glob(pattern, root_dir=WORKDIR)
             if (WORKDIR / match).resolve().is_relative_to(WORKDIR)
         ]
-        return "\n".join(matches) if matches else "(no matches)"
+        return "\n".join(matches) if matches else "（没有匹配项）"
     except Exception as error:
-        return f"Error: {error}"
+        return f"错误：{error}"
 
 
 TOOLS = [

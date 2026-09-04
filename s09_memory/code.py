@@ -16,7 +16,7 @@ import subprocess
 from pathlib import Path
 
 import yaml
-from anthropic import Anthropic
+from openai import OpenAI
 from dotenv import load_dotenv
 
 try:
@@ -30,14 +30,17 @@ except ImportError:
     pass
 
 load_dotenv(override=True)
-if os.getenv("ANTHROPIC_BASE_URL"):
-    os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
 
 WORKDIR = Path.cwd()
 MEMORY_DIR = WORKDIR / ".memory"
 MEMORY_INDEX = MEMORY_DIR / "MEMORY.md"
-client = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL"))
-MODEL = os.environ["MODEL_ID"]
+client = OpenAI(
+    api_key=os.getenv("OPENAI_API_KEY"),
+    base_url=os.getenv("OPENAI_BASE_URL") or None,
+)
+MODEL = os.getenv("OPENAI_MODEL_ID")
+if not MODEL:
+    raise RuntimeError("缺少 OPENAI_MODEL_ID，请在项目根目录的 .env 中配置模型名称")
 
 # -- Memory store --
 
@@ -220,12 +223,15 @@ def list_memory_files() -> list[dict]:
 
 def block_text(block) -> str:
     if isinstance(block, dict):
-        return str(block.get("text", "")) if block.get("type") == "text" else ""
+        return str(block.get("text", "")) if block.get("type") in ("text", "output_text") else ""
     return (
         str(getattr(block, "text", ""))
-        if getattr(block, "type", None) == "text"
+        if getattr(block, "type", None) in ("text", "output_text")
         else ""
     )
+
+def response_text(response) -> str:
+    return str(getattr(response, "output_text", "") or "").strip()
 
 def message_text(message: dict) -> str:
     content = message.get("content", "")
@@ -294,14 +300,12 @@ def select_relevant_memories(messages: list, max_items: int = 5) -> list[str]:
     )
 
     try:
-        response = client.messages.create(
+        response = client.responses.create(
             model=MODEL,
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=200,
+            input=[{"role": "user", "content": prompt}],
+            max_output_tokens=200,
         )
-        indices = extract_json_array(
-            message_text({"content": response.content})
-        )
+        indices = extract_json_array(response_text(response))
         selected = []
         for index in indices:
             if isinstance(index, int) and 0 <= index < len(records):
@@ -408,16 +412,14 @@ def extract_memories(messages: list) -> int:
     )
 
     try:
-        response = client.messages.create(
+        response = client.responses.create(
             model=MODEL,
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=1000,
+            input=[{"role": "user", "content": prompt}],
+            max_output_tokens=1000,
         )
         candidates = [
             validated
-            for item in extract_json_array(
-                message_text({"content": response.content})
-            )
+            for item in extract_json_array(response_text(response))
             if (
                 validated := validate_memory_record(
                     item, require_scope=True
@@ -470,16 +472,14 @@ def consolidate_memories() -> int:
             raise ValueError(
                 "memory store is too large for one consolidation pass"
             )
-        response = client.messages.create(
+        response = client.responses.create(
             model=MODEL,
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=3000,
+            input=[{"role": "user", "content": prompt}],
+            max_output_tokens=3000,
         )
         consolidated = [
             validated
-            for item in extract_json_array(
-                message_text({"content": response.content})
-            )
+            for item in extract_json_array(response_text(response))
             if (validated := validate_memory_record(item)) is not None
         ]
         slugs = [memory_slug(record["name"]) for record in consolidated]
@@ -589,16 +589,11 @@ def run_glob(pattern: str) -> str:
         return f"Error: {error}"
 
 TOOLS = [
-    {"name": "bash", "description": "Run a shell command.",
-     "input_schema": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}},
-    {"name": "read_file", "description": "Read file contents.",
-     "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "limit": {"type": "integer"}}, "required": ["path"]}},
-    {"name": "write_file", "description": "Write content to a file.",
-     "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}},
-    {"name": "edit_file", "description": "Replace exact text in a file once.",
-     "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "old_text": {"type": "string"}, "new_text": {"type": "string"}}, "required": ["path", "old_text", "new_text"]}},
-    {"name": "glob", "description": "Find files matching a glob pattern.",
-     "input_schema": {"type": "object", "properties": {"pattern": {"type": "string"}}, "required": ["pattern"]}},
+    {"type": "function", "name": "bash", "description": "执行一条 Shell 命令。", "parameters": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"], "additionalProperties": False}},
+    {"type": "function", "name": "read_file", "description": "读取文件内容。", "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "limit": {"type": "integer"}}, "required": ["path"], "additionalProperties": False}},
+    {"type": "function", "name": "write_file", "description": "将内容写入文件。", "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"], "additionalProperties": False}},
+    {"type": "function", "name": "edit_file", "description": "精确替换文件中首次出现的指定文本。", "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "old_text": {"type": "string"}, "new_text": {"type": "string"}}, "required": ["path", "old_text", "new_text"], "additionalProperties": False}},
+    {"type": "function", "name": "glob", "description": "查找与 glob 模式匹配的文件。", "parameters": {"type": "object", "properties": {"pattern": {"type": "string"}}, "required": ["pattern"], "additionalProperties": False}},
 ]
 
 TOOL_HANDLERS = {
@@ -626,35 +621,35 @@ def trigger_hooks(event: str, *args):
 DENY_LIST = ["rm -rf /", "sudo", "shutdown", "reboot", "mkfs", "dd if="]
 DESTRUCTIVE = ["rm ", "> /etc/", "chmod 777"]
 
-def permission_hook(block):
-    if block.name == "bash":
-        command = block.input.get("command", "")
+def permission_hook(tool_name: str, arguments: dict):
+    if tool_name == "bash":
+        command = arguments.get("command", "")
         for pattern in DENY_LIST:
             if pattern in command:
                 return f"Permission denied by deny list: {pattern}"
         if any(keyword in command for keyword in DESTRUCTIVE):
-            print("\n\033[33m[permission] Potentially destructive command\033[0m")
-            print(f"   Tool: {block.name}({block.input})")
+            print("\n\033[33m[权限确认] 可能具有破坏性的命令\033[0m")
+            print(f"   工具：{tool_name}({arguments})")
             if input("   Allow? [y/N] ").strip().lower() not in ("y", "yes"):
                 return "Permission denied by user"
 
-    if block.name in ("read_file", "write_file", "edit_file"):
-        path = block.input.get("path", "")
+    if tool_name in ("read_file", "write_file", "edit_file"):
+        path = arguments.get("path", "")
         if not (WORKDIR / path).resolve().is_relative_to(WORKDIR):
-            print("\n\033[33m[permission] Access outside workspace\033[0m")
-            print(f"   Tool: {block.name}({block.input})")
+            print("\n\033[33m[权限确认] 正在访问工作区外部\033[0m")
+            print(f"   工具：{tool_name}({arguments})")
             if input("   Allow? [y/N] ").strip().lower() not in ("y", "yes"):
                 return "Permission denied by user"
     return None
 
-def log_hook(block):
-    preview = str(list(block.input.values())[:2])[:60]
-    print(f"\033[90m[HOOK] {block.name}({preview})\033[0m")
+def log_hook(tool_name: str, arguments: dict):
+    preview = str(list(arguments.values())[:2])[:60]
+    print(f"\033[90m[HOOK] {tool_name}({preview})\033[0m")
     return None
 
-def large_output_hook(block, output):
+def large_output_hook(tool_name: str, arguments: dict, output):
     if len(str(output)) > 100000:
-        print(f"\033[33m[HOOK] Large output from {block.name}: {len(str(output))} chars\033[0m")
+        print(f"\033[33m[HOOK] {tool_name} 输出过大：{len(str(output))} 个字符\033[0m")
     return None
 
 def context_inject_hook(query: str):
@@ -665,12 +660,7 @@ def summary_hook(messages: list):
     tool_count = sum(
         1
         for message in messages
-        for block in (
-            message.get("content")
-            if isinstance(message.get("content"), list)
-            else []
-        )
-        if isinstance(block, dict) and block.get("type") == "tool_result"
+        if (message.get("type") if isinstance(message, dict) else getattr(message, "type", None)) == "function_call"
     )
     print(f"\033[90m[HOOK] Stop: session used {tool_count} tool calls\033[0m")
     return None
@@ -681,18 +671,18 @@ register_hook("PreToolUse", log_hook)
 register_hook("PostToolUse", large_output_hook)
 register_hook("Stop", summary_hook)
 
-def execute_tool(block) -> str:
-    blocked = trigger_hooks("PreToolUse", block)
+def execute_tool(tool_name: str, arguments: dict) -> str:
+    blocked = trigger_hooks("PreToolUse", tool_name, arguments)
     if blocked:
         return str(blocked)
 
-    handler = TOOL_HANDLERS.get(block.name)
+    handler = TOOL_HANDLERS.get(tool_name)
     try:
-        output = handler(**block.input) if handler else f"Unknown: {block.name}"
+        output = handler(**arguments) if handler else f"错误：未知工具 {tool_name}"
     except Exception as error:
-        output = f"Error: {error}"
+        output = f"错误：{error}"
 
-    trigger_hooks("PostToolUse", block, output)
+    trigger_hooks("PostToolUse", tool_name, arguments, output)
     return str(output)
 
 # -- Agent loop --
@@ -702,20 +692,17 @@ def agent_loop(messages: list):
     system = build_system(relevant_memories)
 
     while True:
-        response = client.messages.create(
+        response = client.responses.create(
             model=MODEL,
-            system=system,
-            messages=messages,
+            instructions=system,
+            input=messages,
             tools=TOOLS,
-            max_tokens=8000,
+            max_output_tokens=8000,
         )
-        messages.append({
-            "role": "assistant",
-            "content": response.content,
-        })
+        messages.extend(response.output)
 
         tool_calls = [
-            block for block in response.content if block.type == "tool_use"
+            item for item in response.output if item.type == "function_call"
         ]
         if not tool_calls:
             force = trigger_hooks("Stop", messages)
@@ -724,21 +711,21 @@ def agent_loop(messages: list):
                 continue
             if extract_memories(messages):
                 consolidate_memories()
-            return
+            return response.output_text
 
-        results = []
-        for block in tool_calls:
-            output = execute_tool(block)
-            results.append({
-                "type": "tool_result",
-                "tool_use_id": block.id,
-                "content": output,
+        for tool_call in tool_calls:
+            arguments = json.loads(tool_call.arguments)
+            output = execute_tool(tool_call.name, arguments)
+            messages.append({
+                "type": "function_call_output",
+                "call_id": tool_call.call_id,
+                "output": output,
             })
-        messages.append({"role": "user", "content": results})
 
 if __name__ == "__main__":
-    print("s09: Memory - selective knowledge across sessions")
-    print("Enter a question, press Enter to send. Type q to quit.\n")
+    print("s09：记忆 - 跨会话选择性保存知识")
+    print("输入问题后按回车发送，输入 q 或 exit 退出。\n")
+    print(f"请求地址：{client.base_url}responses")
 
     history = []
     while True:
@@ -750,8 +737,7 @@ if __name__ == "__main__":
             break
         trigger_hooks("UserPromptSubmit", query)
         history.append({"role": "user", "content": query})
-        agent_loop(history)
-        for block in history[-1]["content"]:
-            if getattr(block, "type", None) == "text":
-                print(block.text)
+        final_text = agent_loop(history)
+        if final_text:
+            print(final_text)
         print()
